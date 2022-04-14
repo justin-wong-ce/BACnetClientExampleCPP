@@ -2,6 +2,13 @@
 
 ## Version 0.0.x
 
+### 0.0.7 (2022-Apr-14) (WIP)
+
+- Added UTC Time Synch example service
+- Added Unconfirmed Text Message example service
+- Added Device Communication Control example service
+- Added more options in user input menu
+
 ### 0.0.6 (2021-Jul-15)
 
 - Added confirmed text message request example service

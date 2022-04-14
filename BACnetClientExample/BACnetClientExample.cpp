@@ -13,6 +13,8 @@
 */
 
 #include <iostream>
+#include <chrono>
+#include <ctime> 
 
 #include "CASBACnetStackAdapter.h"
 #include "CASBACnetStackExampleConstants.h"
@@ -61,8 +63,12 @@ uint8_t invokeId;
 
 // Constants
 // =======================================
-const std::string APPLICATION_VERSION = "0.0.6";  // See CHANGELOG.md for a full list of changes.
+const std::string APPLICATION_VERSION = "0.0.7";  // See CHANGELOG.md for a full list of changes.
 const uint32_t MAX_XML_RENDER_BUFFER_LENGTH = 1024 * 20;
+
+// Values DB
+// =======================================
+int64_t currentTimeOffset = 0;
 
 // Settings 
 // =======================================
@@ -70,7 +76,7 @@ const uint16_t SETTING_BACNET_IP_PORT = 47808;
 const uint32_t SETTING_CLIENT_DEVICE_INSTANCE = 389002; 
 const uint16_t SETTING_DOWNSTREAM_DEVICE_PORT = SETTING_BACNET_IP_PORT;
 const uint32_t SETTING_DOWNSTREAM_DEVICE_INSTANCE = 389999; 
-const std::string SETTING_DEFAULT_DOWNSTREAM_DEVICE_IP_ADDRESS = "192.168.2.217";
+const std::string SETTING_DEFAULT_DOWNSTREAM_DEVICE_IP_ADDRESS = "192.168.1.28";
 
 // Downstream IP Initialization
 // =======================================
@@ -84,6 +90,7 @@ uint16_t CallbackSendMessage(const uint8_t* message, const uint16_t messageLengt
 
 // System Functions
 time_t CallbackGetSystemTime();
+bool CallbackSetSystemTime(const uint32_t deviceInstance, const uint8_t year, const uint8_t month, const uint8_t day, const uint8_t weekday, const uint8_t hour, const uint8_t minute, const uint8_t second, const uint8_t hundrethSeconds);
 
 
 // Hooks for unconfirmed requests
@@ -120,6 +127,7 @@ bool DoUserInput();
 void WaitForResponse(unsigned int timeout=3); 
 void HelperPrintCommonHookParameters(const uint8_t* connectionString, const uint8_t connectionStringLength, const uint8_t networkType, const uint16_t network, const uint8_t* sourceAddress, const uint8_t sourceAddressLength);
 void HelperPrintCommonHookPropertyParameters(const uint32_t originalInvokeId, const uint8_t service, const uint16_t objectType, const uint32_t objectInstance, const uint32_t propertyIdentifier, const bool usePropertyArrayIndex, const uint32_t propertyArrayIndex);
+bool HelperSetIPAndPort(uint8_t* connectionString, std::string ipString, uint16_t port);
 
 // Example Services
 void ExampleWhoIs();
@@ -127,6 +135,9 @@ void ExampleReadProperty();
 void ExampleWriteProperty();
 void ExampleSubscribeCOV();
 void ExampleConfirmedTextMessage();
+void ExampleUnconfirmedTextMessage();
+void ExampleSendUTCTimeSynchronization();
+void ExampleSendDeviceCommunicationControl();
 
 int main(int argc, char ** argv )
 {
@@ -175,6 +186,7 @@ int main(int argc, char ** argv )
 
 	// System Time Callback Functions
 	fpRegisterCallbackGetSystemTime(CallbackGetSystemTime);
+	fpRegisterCallbackSetSystemTime(CallbackSetSystemTime);
 
 	// Non-confirmed responses 
 	fpRegisterHookIAm(HookIAm);
@@ -215,6 +227,33 @@ int main(int argc, char ** argv )
 		return false;
 	}
 	std::cout << "Created Device." << std::endl;
+	
+	// Enable the services that this device supports
+	// Some services are mandatory for BACnet devices and are already enabled.
+	// These are: Read Property, Who Is, Who Has
+	//
+	// Any other services need to be enabled as below.
+
+	std::cout << "Enabling UTCTimeSynchronization... ";
+	if (!fpSetServiceEnabled(SETTING_CLIENT_DEVICE_INSTANCE, CASBACnetStackExampleConstants::SERVICE_UTC_TIME_SYNCHRONIZATION, true)) {
+		std::cerr << "Failed to enable the UTCTimeSynchronization service" << std::endl;
+		return false;
+	}
+	std::cout << "OK" << std::endl;
+
+	std::cout << "Enabling UnconfirmedTextMessage...";
+	if (!fpSetServiceEnabled(SETTING_CLIENT_DEVICE_INSTANCE, CASBACnetStackExampleConstants::SERVICE_UNCONFIRMED_TEXT_MESSAGE, true)) {
+		std::cerr << "Failed to enable the UnconfirmedTextMessage service";
+		return false;
+	}
+	std::cout << "OK" << std::endl;
+
+	std::cout << "Enabling DeviceCommunicationControl...";
+	if (!fpSetServiceEnabled(SETTING_CLIENT_DEVICE_INSTANCE, CASBACnetStackExampleConstants::SERVICE_DEVICE_COMMUNICATION_CONTROL, true)) {
+		std::cerr << "Failed to enable the DeviceCommunicationControl service";
+		return false;
+	}
+	std::cout << "OK" << std::endl;
 
 	// Enable services supported by this device 
 	fpSetServiceEnabled(SETTING_CLIENT_DEVICE_INSTANCE, CASBACnetStackExampleConstants::SERVICE_I_AM, true);
@@ -229,13 +268,9 @@ int main(int argc, char ** argv )
 	// 5. Convert the IP Address and Port to a connection string
 	// ---------------------------------------------------------------------------
 	std::cout << "Generated the connection string for the downstream device. " << std::endl ;
-	if (!ChipkinCommon::ChipkinConvert::IPAddressToBytes(downstream_Device_ip_address.c_str(), downstreamConnectionString, 6)) {
-		std::cerr << "Failed to convert the ip address to a connection string" << std::endl ;
-		return -4;
+	if (!HelperSetIPAndPort(downstreamConnectionString, downstream_Device_ip_address, SETTING_BACNET_IP_PORT)) {
+		return 0;
 	}
-	downstreamConnectionString[4] = SETTING_DOWNSTREAM_DEVICE_PORT / 256;
-	downstreamConnectionString[5] = SETTING_DOWNSTREAM_DEVICE_PORT % 256;
-
 
 	// 6. Start the main loop
 	// ---------------------------------------------------------------------------
@@ -283,7 +318,7 @@ bool DoUserInput()
 			ExampleReadProperty();
 			break;
 		}
-		case 'u': {
+		case 'm': {
 			ExampleWriteProperty();
 			break; 
 		}
@@ -294,6 +329,37 @@ bool DoUserInput()
 		case 't': {
 			ExampleConfirmedTextMessage();
 			break;
+		}
+		case 'u': {
+			ExampleUnconfirmedTextMessage();
+			break;
+		}
+		case 's': {
+			ExampleSendUTCTimeSynchronization();
+			break;
+		}
+		case 'd': {
+			ExampleSendDeviceCommunicationControl();
+			break;
+		}
+		case 'i': {
+			std::string inputIpString, inputPortString;
+			std::cout << "Enter new server IP string (i.e. 192.168.1.20): \n";
+			std::cin >> inputIpString;
+			std::cout << "Enter new port (i.e. 47808): \n";
+			std::cin >> inputPortString;
+
+			if (!HelperSetIPAndPort(downstreamConnectionString, inputIpString, std::atoi(inputPortString.c_str()))) {
+				std::cout << "Could not update IP and Port\n";
+			}
+			else {
+				std::cout << "Server address updated to: ";
+				for (int offset = 0; offset < 3; offset++) {
+					std::cout << int(downstreamConnectionString[offset]) << ".";
+				}
+				std::cout << int(downstreamConnectionString[3]) << ":";
+				std::cout << int(downstreamConnectionString[4] * 256 + downstreamConnectionString[5]) << std::endl;
+			}
 		}
 		default: {
 			// Print the Help
@@ -308,9 +374,13 @@ bool DoUserInput()
 			std::cout << "- Q - Quit" << std::endl;
 			std::cout << "- W - Send WhoIs message" << std::endl;
 			std::cout << "- R - Send Read property messages" << std::endl;
-			std::cout << "- U - Send Write property messages" << std::endl;
+			std::cout << "- M - Send Write property messages" << std::endl;
 			std::cout << "- C - Send Subscribe COV Request" << std::endl;
 			std::cout << "- T - Send Confirmed Text Message Request" << std::endl;
+			std::cout << "- U - Send Unconfirmed Text Message Request" << std::endl;
+			std::cout << "- S - Send UTC Time Synchronization Request" << std::endl;
+			std::cout << "- D - Send Device Communication Control Request" << std::endl;
+			std::cout << "- I - Change server IP address" << std::endl;
 			std::cout << std::endl;
 			break;
 		}
@@ -464,6 +534,46 @@ void ExampleConfirmedTextMessage() {
 	WaitForResponse();
 }
 
+// Plugfest TODO: Test
+void ExampleUnconfirmedTextMessage() {
+	// Text message settings
+	bool useMessageClass = true; // Enable or disable message class property
+	uint32_t messageClassUnsigned = 5;
+	char messageClassString[] = "";
+	uint8_t messagePriority = 0; // 0 = normal, 1 = urgent
+	char message[] = "Hello from the C++ client example";
+
+	// Send confirmed text message request
+	// C++ server example configured to handle and send response (+) with default settings
+	std::cout << "Sending Unconfirmed Text Message";
+	fpSendUnconfirmedTextMessage(SETTING_CLIENT_DEVICE_INSTANCE, useMessageClass, messageClassUnsigned, messageClassString, strlen(messageClassString), messagePriority, message, strlen(message), downstreamConnectionString, 6, 0, true, 0, NULL, 0);
+
+	WaitForResponse();
+}
+
+// Plugfest TODO: Assuming this is UTC Time Synch
+void ExampleSendUTCTimeSynchronization() {
+	// Get current date and time
+	std::time_t time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+	tm timeNow = *localtime(&time);
+
+	// Send UTC Time Syncrhonization
+	std::cout << "Sending UTC Time Synchronization";
+	fpSendUTCTimeSynchronization(timeNow.tm_year + 1900, timeNow.tm_mon + 1, timeNow.tm_mday, timeNow.tm_wday, timeNow.tm_hour, timeNow.tm_min, timeNow.tm_sec, 0, downstreamConnectionString, 6, 0, true, 0, NULL, 0);
+
+	WaitForResponse();
+}
+
+void ExampleSendDeviceCommunicationControl() {
+	// Ask for password
+	std::string password;
+	std::cout << "Please input password: ";
+	std::cin >> password;
+
+	// Send Device Communication Control
+	fpSendDeviceCommunicationControl(&invokeId, true, false, 0, &password[0], password.length(), downstreamConnectionString, 6, 0, 0, NULL, 0);
+}
+
 
 // ================================================================================================
 // Callbacks 
@@ -579,7 +689,25 @@ uint16_t CallbackSendMessage(const uint8_t* message, const uint16_t messageLengt
 // Callback used by the BACnet Stack to get the current time
 time_t CallbackGetSystemTime()
 {
-	return time(0) ;
+	return time(0) - currentTimeOffset;
+}
+
+// Callback used by the BACnet Stack to set the current time
+bool CallbackSetSystemTime(const uint32_t deviceInstance, const uint8_t year, const uint8_t month, const uint8_t day, const uint8_t weekday, const uint8_t hour, const uint8_t minute, const uint8_t second, const uint8_t hundrethSeconds) {
+
+	// Calculate the time_t based on the passed in parameters
+	struct tm timeInfo;
+	timeInfo.tm_year = year;
+	timeInfo.tm_mon = month - 1;
+	timeInfo.tm_mday = day;
+	timeInfo.tm_wday = weekday == 7 ? 0 : weekday;
+	timeInfo.tm_hour = hour;
+	timeInfo.tm_min = minute;
+	timeInfo.tm_sec = second;
+
+	// Calculate and store the current time offset
+	currentTimeOffset = time(0) - mktime(&timeInfo);
+	return true;
 }
 
 // Outputs fetched data to console in readable format
@@ -777,6 +905,18 @@ void HelperPrintCommonHookPropertyParameters(const uint32_t originalInvokeId, co
 	if (usePropertyArrayIndex) {
 		std::cout << "propertyArrayIndex=[" << propertyArrayIndex << "], ";
 	}
+}
+
+bool HelperSetIPAndPort(uint8_t* connectionString, std::string ipString, uint16_t port) {
+	// Convert the IP Address to the connection string
+	if (!ChipkinCommon::ChipkinConvert::IPAddressToBytes(ipString.c_str(), connectionString, 6)) {
+		std::cerr << "Failed to convert the ip address into a connectionString" << std::endl;
+		return false;
+	}
+	connectionString[4] = port / 256;
+	connectionString[5] = port % 256;
+
+	return true;
 }
 
 
