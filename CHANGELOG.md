@@ -8,6 +8,7 @@
 - Added Unconfirmed Text Message example service
 - Added Device Communication Control example service
 - Added more options in user input menu
+- Updated project to include files from latest version of cas-bacnet-stack
 
 ### 0.0.6 (2021-Jul-15)
 
